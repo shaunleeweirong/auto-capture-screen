@@ -13,6 +13,9 @@ you unwatermarked PDF export for free, with everything stored on your own device
 ## Features (v1)
 
 - **Start/Stop recording** from the side panel — no always-on capture.
+- **Records the whole window** — capture follows you across same-tab navigation
+  **and** new tabs opened by links, so multi-page / multi-tab workflows are
+  captured continuously.
 - **Screenshot per click**, with the clicked element auto-highlighted and a
   numbered badge.
 - **Auto-generated step text** (e.g. `Click "Save"`) — editable.
@@ -33,7 +36,7 @@ you unwatermarked PDF export for free, with everything stored on your own device
 | Context | Responsibility |
 |---|---|
 | `entrypoints/recorder.content.ts` | Declarative content script auto-injected on every page (and re-injected after navigation). Listens for clicks, reports the element + highlight, and asks the background `GUIDELY_HELLO` on load to resume recording across navigations. |
-| `entrypoints/background.ts` | Owns `captureVisibleTab`, a serial ≥520 ms capture queue (Chrome's 2/sec throttle), WebP compression via `OffscreenCanvas`, and IndexedDB writes. |
+| `entrypoints/background.ts` | Owns `captureVisibleTab`, a serial ≥520 ms capture queue (Chrome's 2/sec throttle), WebP compression via `OffscreenCanvas`, and IndexedDB writes. Recording is scoped to the **window** (gates steps by `windowId` and broadcasts start/stop to its tabs), so new tabs are captured too; capture retries once to ride out navigation/new-tab transitions. |
 | `entrypoints/sidepanel/` | Start/Stop + live step count. |
 | `entrypoints/editor/` | Guide list, step editor, blur/annotation tools, PDF export. |
 | `lib/` | `db`, `state`, `steptext`, `render`, `pdf`, `images`, `types`, `messages`. |
@@ -95,12 +98,17 @@ npm run test:e2e
 ```
 
 Launches real Chromium with the (dev) extension loaded and drives a multi-click
-workflow **across a full-page navigation**, asserting that steps from both pages
-are captured and stored. This guards the v0.1.0 regression where only the first
-click (before navigation) was captured.
+workflow across a **same-tab navigation** and a **new tab opened by a link**,
+asserting that steps from every page and tab are captured and stored. This guards
+two regressions: only the first click being captured (v0.1.0), and recording
+stopping when a link opened a new tab.
 
 ## Known limitations (v1)
 
+- Recording follows the **window** you started in. New **separate browser
+  windows / pop-ups** opened from the flow are not followed.
+- A click that **opens a new tab** captures the destination page (the new tab has
+  taken focus by the time the screenshot is taken), not the link itself.
 - Capture is throttled to **2 screenshots/second** (a hard Chrome limit) — rapid
   clicks are queued, not dropped.
 - Cannot capture `chrome://` pages, the Chrome Web Store, or cross-origin

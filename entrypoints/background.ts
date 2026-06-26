@@ -10,7 +10,13 @@ const MAX_IMAGE_WIDTH = 1600; // downscale cap to keep storage + PDF sizes sane
 // Test-only instrumentation for the e2e test, gated on the build mode so it is
 // dead-code-eliminated from the production build (npm run build => MODE=production).
 const TESTING = import.meta.env.MODE === 'development';
-const diag = { steps: [] as string[], captures: [] as string[], errors: [] as string[] };
+const diag = {
+  steps: [] as string[],
+  tabs: [] as number[],
+  senders: [] as string[],
+  captures: [] as string[],
+  errors: [] as string[],
+};
 
 export default defineBackground(() => {
   // Clicking the toolbar icon opens the side panel.
@@ -62,7 +68,7 @@ export default defineBackground(() => {
 
 async function handleHello(sender: chrome.runtime.MessageSender): Promise<HelloResponse> {
   const st = await getState();
-  return { recording: st.recording && sender.tab?.id === st.tabId };
+  return { recording: st.recording && sender.tab?.windowId === st.windowId };
 }
 
 async function startRecording(): Promise<StartStopResponse> {
@@ -97,26 +103,33 @@ async function startRecordingOnTab(tabId: number, windowId: number): Promise<Sta
   await putGuide(guide);
   await setState({ recording: true, guideId: guide.id, tabId, windowId, count: 0 });
 
-  try {
-    await chrome.tabs.sendMessage(tabId, { type: 'GUIDELY_RECORDING', value: true });
-  } catch {
-    /* content script reads recording state via GUIDELY_HELLO too */
-  }
+  // Enable recording on every tab already open in this window. New tabs opened
+  // later (e.g. by links) resume automatically via GUIDELY_HELLO on load.
+  await broadcastRecording(windowId, true);
 
   return { ok: true, guideId: guide.id, count: 0 };
 }
 
 async function stopRecording(): Promise<StartStopResponse> {
   const st = await getState();
-  if (st.tabId != null) {
-    try {
-      await chrome.tabs.sendMessage(st.tabId, { type: 'GUIDELY_RECORDING', value: false });
-    } catch {
-      /* tab may be gone */
-    }
+  if (st.windowId != null) {
+    await broadcastRecording(st.windowId, false);
   }
   await patchState({ recording: false });
   return { ok: true, guideId: st.guideId, count: st.count };
+}
+
+// Tell every tab in a window to start/stop recording. Tabs without the content
+// script (chrome://, etc.) simply reject the message — ignored.
+async function broadcastRecording(windowId: number, value: boolean) {
+  const tabs = await chrome.tabs.query({ windowId });
+  await Promise.all(
+    tabs.map((t) =>
+      t.id != null
+        ? chrome.tabs.sendMessage(t.id, { type: 'GUIDELY_RECORDING', value }).catch(() => {})
+        : Promise.resolve(),
+    ),
+  );
 }
 
 // ---- Step capture (serial queue, throttle-safe) ----
@@ -127,9 +140,15 @@ let lastCaptureTs = 0;
 
 async function handleStep(payload: StepPayload, sender: chrome.runtime.MessageSender) {
   const st = await getState();
+  if (TESTING) {
+    diag.senders.push(`tab=${sender.tab?.id} win=${sender.tab?.windowId} stWin=${st.windowId} rec=${st.recording}`);
+  }
   if (!st.recording || !st.guideId) return;
-  if (sender.tab?.id !== st.tabId) return; // ignore other tabs
-  if (TESTING) diag.steps.push(payload.url);
+  if (sender.tab?.windowId !== st.windowId) return; // record the whole window
+  if (TESTING) {
+    diag.steps.push(payload.url);
+    if (sender.tab?.id != null) diag.tabs.push(sender.tab.id);
+  }
 
   queue.push(() => captureAndStore(payload, st));
   if (!draining) void drain();
@@ -155,7 +174,16 @@ async function drain() {
 async function captureAndStore(payload: StepPayload, st: RecState) {
   if (!st.guideId || st.windowId == null) return;
 
-  const dataUrl = await chrome.tabs.captureVisibleTab(st.windowId, { format: 'png' });
+  // A click that opens a new tab (or navigates) can momentarily leave the
+  // window on a not-yet-committed page, where captureVisibleTab throws a
+  // host-access error. Retry once after a short delay so the new page commits.
+  let dataUrl: string;
+  try {
+    dataUrl = await chrome.tabs.captureVisibleTab(st.windowId, { format: 'png' });
+  } catch {
+    await sleep(400);
+    dataUrl = await chrome.tabs.captureVisibleTab(st.windowId, { format: 'png' });
+  }
   const { blob, width, height } = await processScreenshot(dataUrl);
   const imageId = crypto.randomUUID();
   await putImage(imageId, blob);
