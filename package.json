@@ -1,0 +1,30 @@
+{
+  "name": "guidely",
+  "description": "Record clicks into step-by-step guides and export them as PDF. All data stays on your device. Built by Shaun Lee Wei Rong.",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "wxt",
+    "dev:firefox": "wxt -b firefox",
+    "build": "wxt build",
+    "zip": "wxt zip",
+    "compile": "tsc --noEmit",
+    "test:e2e": "wxt build --mode development && node test/e2e.mjs",
+    "postinstall": "wxt prepare"
+  },
+  "dependencies": {
+    "jspdf": "^4.2.1",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0"
+  },
+  "devDependencies": {
+    "@types/chrome": "^0.2.0",
+    "@types/react": "^19.2.0",
+    "@types/react-dom": "^19.2.0",
+    "@wxt-dev/module-react": "^1.2.2",
+    "playwright": "^1.61.1",
+    "typescript": "^5.9.0",
+    "wxt": "^0.20.27"
+  }
+}
