@@ -118,3 +118,69 @@ export async function appendStep(guideId: string, step: Step): Promise<number> {
     getReq.onerror = () => reject(getReq.error);
   });
 }
+
+// Remove a step inside a single read-modify-write transaction. Like appendStep,
+// this is meant to run on the background's serial queue so it never interleaves
+// with a capture. Returns the new step count and the removed step's imageId (so
+// the caller can clean up its blob). Idempotent: a missing guide or unknown
+// stepId resolves as a no-op. Note: Step.order is left as-is — it is never read
+// (the editor and PDF number by array index), matching the editor's removeStep.
+export async function deleteStep(
+  guideId: string,
+  stepId: string,
+): Promise<{ count: number; removedImageId: string | null }> {
+  const db = await openDb();
+  return new Promise((resolve, reject) => {
+    const t = db.transaction(STORE_GUIDES, 'readwrite');
+    const store = t.objectStore(STORE_GUIDES);
+    const getReq = store.get(guideId);
+    getReq.onsuccess = () => {
+      const guide: Guide | undefined = getReq.result;
+      if (!guide) {
+        resolve({ count: 0, removedImageId: null });
+        return;
+      }
+      const step = guide.steps.find((s) => s.id === stepId);
+      if (!step) {
+        resolve({ count: guide.steps.length, removedImageId: null });
+        return;
+      }
+      guide.steps = guide.steps.filter((s) => s.id !== stepId);
+      guide.updatedAt = Date.now();
+      const putReq = store.put(guide);
+      putReq.onsuccess = () => resolve({ count: guide.steps.length, removedImageId: step.imageId });
+      putReq.onerror = () => reject(putReq.error);
+    };
+    getReq.onerror = () => reject(getReq.error);
+  });
+}
+
+// Update a single step's instruction text inside one read-modify-write
+// transaction (serialized on the background queue). Returns the step count.
+// Idempotent: a missing guide or unknown stepId resolves as a no-op.
+export async function updateStepText(guideId: string, stepId: string, text: string): Promise<number> {
+  const db = await openDb();
+  return new Promise((resolve, reject) => {
+    const t = db.transaction(STORE_GUIDES, 'readwrite');
+    const store = t.objectStore(STORE_GUIDES);
+    const getReq = store.get(guideId);
+    getReq.onsuccess = () => {
+      const guide: Guide | undefined = getReq.result;
+      if (!guide) {
+        resolve(0);
+        return;
+      }
+      const step = guide.steps.find((s) => s.id === stepId);
+      if (!step) {
+        resolve(guide.steps.length);
+        return;
+      }
+      step.text = text;
+      guide.updatedAt = Date.now();
+      const putReq = store.put(guide);
+      putReq.onsuccess = () => resolve(guide.steps.length);
+      putReq.onerror = () => reject(putReq.error);
+    };
+    getReq.onerror = () => reject(getReq.error);
+  });
+}

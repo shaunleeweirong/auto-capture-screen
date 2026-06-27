@@ -224,6 +224,21 @@ button:disabled {
   text-align: center;
 }
 
+/* live step list while recording (reuses the editor's .step-* card styles) */
+.rec-steps {
+  max-height: 60vh;
+  overflow-y: auto;
+  margin: 0 -4px;
+  padding: 2px 4px;
+}
+.rec-steps .step-list {
+  gap: 12px;
+}
+.step-row.deleting {
+  opacity: 0.5;
+  pointer-events: none;
+}
+
 /* ---------- Editor ---------- */
 
 .container {

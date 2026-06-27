@@ -2,7 +2,7 @@
   "name": "guidely",
   "description": "Record clicks into step-by-step guides and export them as PDF. All data stays on your device. Built by Shaun Lee Wei Rong.",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.2.0",
   "type": "module",
   "scripts": {
     "dev": "wxt",

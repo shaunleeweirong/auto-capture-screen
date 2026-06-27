@@ -32,11 +32,23 @@ export interface RecordingToggleMsg {
 }
 
 // side panel -> service worker
-export type PanelMsg = { type: 'START_RECORDING' } | { type: 'STOP_RECORDING' };
+export type PanelMsg =
+  | { type: 'START_RECORDING' }
+  | { type: 'STOP_RECORDING' }
+  | { type: 'DELETE_STEP'; stepId: string }
+  | { type: 'UPDATE_STEP'; stepId: string; text: string };
 
 export interface StartStopResponse {
   ok: boolean;
   error?: string;
   guideId?: string;
+  count?: number;
+}
+
+// Response to DELETE_STEP / UPDATE_STEP. Routed through the background so the
+// mutation is serialized on the same queue as captures (no lost-update race).
+export interface StepMutationResponse {
+  ok: boolean;
+  error?: string;
   count?: number;
 }

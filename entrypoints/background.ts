@@ -1,6 +1,14 @@
-import type { ContentHelloMsg, ContentStepMsg, HelloResponse, PanelMsg, StartStopResponse, StepPayload } from '@/lib/messages';
+import type {
+  ContentHelloMsg,
+  ContentStepMsg,
+  HelloResponse,
+  PanelMsg,
+  StartStopResponse,
+  StepMutationResponse,
+  StepPayload,
+} from '@/lib/messages';
 import type { Guide, RecState, Step } from '@/lib/types';
-import { appendStep, putGuide, putImage } from '@/lib/db';
+import { appendStep, deleteImage, deleteStep, putGuide, putImage, updateStepText } from '@/lib/db';
 import { getState, patchState, setState } from '@/lib/state';
 
 const RECORDER_SCRIPT = 'content-scripts/recorder.js';
@@ -51,6 +59,18 @@ export default defineBackground(() => {
         .catch((e) => sendResponse({ ok: false, error: errMsg(e) } satisfies StartStopResponse));
       return true;
     }
+    if (msg?.type === 'DELETE_STEP') {
+      handleDeleteStep(msg.stepId)
+        .then(sendResponse)
+        .catch((e) => sendResponse({ ok: false, error: errMsg(e) } satisfies StepMutationResponse));
+      return true;
+    }
+    if (msg?.type === 'UPDATE_STEP') {
+      handleUpdateStep(msg.stepId, msg.text)
+        .then(sendResponse)
+        .catch((e) => sendResponse({ ok: false, error: errMsg(e) } satisfies StepMutationResponse));
+      return true;
+    }
     return false;
   });
 
@@ -60,6 +80,9 @@ export default defineBackground(() => {
     Object.assign(globalThis as Record<string, unknown>, {
       __guidelyTestStart: (tabId: number, windowId: number) => startRecordingOnTab(tabId, windowId),
       __guidelyDiag: () => diag,
+      // Delete a step the same way the side panel does — enqueued on the serial
+      // capture queue — so the e2e test can exercise delete-during-recording.
+      __guidelyTestDelete: (stepId: string) => handleDeleteStep(stepId),
     });
   }
 });
@@ -132,9 +155,15 @@ async function broadcastRecording(windowId: number, value: boolean) {
   );
 }
 
-// ---- Step capture (serial queue, throttle-safe) ----
+// ---- Step capture & mutation (single serial queue, throttle-safe) ----
 
-const queue: Array<() => Promise<void>> = [];
+// Captures AND mutations (delete / rename) share one serial queue so a delete
+// can never interleave with an in-flight capture's read-modify-write of the
+// guide. Only captures are subject to the 2/sec captureVisibleTab throttle;
+// mutations run promptly and don't perturb capture timing.
+type QueueTask = { kind: 'capture' | 'mutate'; run: () => Promise<void> };
+
+const queue: QueueTask[] = [];
 let draining = false;
 let lastCaptureTs = 0;
 
@@ -150,25 +179,70 @@ async function handleStep(payload: StepPayload, sender: chrome.runtime.MessageSe
     if (sender.tab?.id != null) diag.tabs.push(sender.tab.id);
   }
 
-  queue.push(() => captureAndStore(payload, st));
+  queue.push({ kind: 'capture', run: () => captureAndStore(payload, st) });
   if (!draining) void drain();
 }
 
 async function drain() {
   draining = true;
   while (queue.length) {
-    const wait = Math.max(0, MIN_CAPTURE_INTERVAL - (Date.now() - lastCaptureTs));
-    if (wait) await sleep(wait);
     const task = queue.shift()!;
+    if (task.kind === 'capture') {
+      const wait = Math.max(0, MIN_CAPTURE_INTERVAL - (Date.now() - lastCaptureTs));
+      if (wait) await sleep(wait);
+    }
     try {
-      await task();
+      await task.run();
     } catch (e) {
-      console.error('[guidely] capture failed', e);
+      console.error('[guidely] queue task failed', e);
       if (TESTING) diag.errors.push(errMsg(e));
     }
-    lastCaptureTs = Date.now();
+    if (task.kind === 'capture') lastCaptureTs = Date.now();
   }
   draining = false;
+}
+
+// Enqueue a guide mutation on the serial queue. Resolves when the task actually
+// runs (after any queued captures ahead of it), so the panel's await is a true
+// completion signal.
+function enqueueMutation(run: () => Promise<StepMutationResponse>): Promise<StepMutationResponse> {
+  return new Promise((resolve) => {
+    queue.push({
+      kind: 'mutate',
+      run: async () => {
+        try {
+          resolve(await run());
+        } catch (e) {
+          resolve({ ok: false, error: errMsg(e) });
+        }
+      },
+    });
+    if (!draining) void drain();
+  });
+}
+
+async function handleDeleteStep(stepId: string): Promise<StepMutationResponse> {
+  const st = await getState();
+  if (!st.recording || !st.guideId) return { ok: false, error: 'Not recording.' };
+  const guideId = st.guideId;
+  return enqueueMutation(async () => {
+    const { count, removedImageId } = await deleteStep(guideId, stepId);
+    if (removedImageId) await deleteImage(removedImageId).catch(() => {});
+    await patchState({ count }); // drives the panel's live-list refetch
+    return { ok: true, count };
+  });
+}
+
+async function handleUpdateStep(stepId: string, text: string): Promise<StepMutationResponse> {
+  const st = await getState();
+  if (!st.recording || !st.guideId) return { ok: false, error: 'Not recording.' };
+  const guideId = st.guideId;
+  // No patchState: count is unchanged, and the panel already shows the new text
+  // (uncontrolled input + optimistic local state); the editor/PDF read from DB.
+  return enqueueMutation(async () => {
+    const count = await updateStepText(guideId, stepId, text);
+    return { ok: true, count };
+  });
 }
 
 async function captureAndStore(payload: StepPayload, st: RecState) {

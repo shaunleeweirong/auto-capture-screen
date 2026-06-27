@@ -133,11 +133,62 @@ try {
   if (g.steps.some((s) => !s.w || !s.h)) fails.push('a step is missing screenshot dimensions');
   if (diag.errors.length) fails.push(`capture errors: ${JSON.stringify(diag.errors)}`);
 
+  // --- Delete-during-recording (side-panel feature) ---
+  // Delete a MIDDLE step via the same serial-queue path the panel uses, then
+  // verify it (and only it) is gone and its screenshot blob was cleaned up.
+  const readGuide = (gid) =>
+    sw.evaluate(async (id) => {
+      const db = await new Promise((res, rej) => {
+        const r = indexedDB.open('guidely');
+        r.onsuccess = () => res(r.result);
+        r.onerror = () => rej(r.error);
+      });
+      const guide = await new Promise((res, rej) => {
+        const r = db.transaction('guides').objectStore('guides').get(id);
+        r.onsuccess = () => res(r.result);
+        r.onerror = () => rej(r.error);
+      });
+      return guide.steps.map((s) => ({ id: s.id, imageId: s.imageId, text: s.text }));
+    }, gid);
+
+  const before = await readGuide(guideId);
+  const victim = before[Math.floor(before.length / 2)];
+  const delRes = await sw.evaluate((stepId) => globalThis.__guidelyTestDelete(stepId), victim.id);
+  await pause(300);
+  const after = await readGuide(guideId);
+  const blobPresent = await sw.evaluate(async (imageId) => {
+    const db = await new Promise((res, rej) => {
+      const r = indexedDB.open('guidely');
+      r.onsuccess = () => res(r.result);
+      r.onerror = () => rej(r.error);
+    });
+    const img = await new Promise((res, rej) => {
+      const r = db.transaction('images').objectStore('images').get(imageId);
+      r.onsuccess = () => res(r.result);
+      r.onerror = () => rej(r.error);
+    });
+    return img != null;
+  }, victim.imageId);
+
+  console.log('\n--- delete-during-recording ---');
+  console.log(
+    `deleted "${victim.text}": ${before.length} → ${after.length} steps; resp count=${delRes?.count}; blob removed=${!blobPresent}`,
+  );
+
+  const expectRemaining = before.filter((s) => s.id !== victim.id).map((s) => s.id);
+  if (!delRes?.ok) fails.push(`delete response not ok: ${JSON.stringify(delRes)}`);
+  if (after.length !== before.length - 1) fails.push(`expected ${before.length - 1} steps after delete, got ${after.length}`);
+  if (after.some((s) => s.id === victim.id)) fails.push('deleted step still present in guide');
+  if (delRes?.count !== after.length) fails.push(`delete response count ${delRes?.count} != stored ${after.length}`);
+  if (blobPresent) fails.push('deleted step screenshot blob was not cleaned up');
+  if (JSON.stringify(after.map((s) => s.id)) !== JSON.stringify(expectRemaining))
+    fails.push('remaining steps changed unexpectedly after delete');
+
   if (fails.length) {
     console.log('\n❌ FAIL\n - ' + fails.join('\n - '));
     code = 1;
   } else {
-    console.log('\n✅ PASS — capture continues across same-tab navigation AND new tabs');
+    console.log('\n✅ PASS — capture survives same-tab nav + new tabs, and delete-during-recording works');
   }
 } catch (e) {
   console.error('TEST ERROR:', e);
