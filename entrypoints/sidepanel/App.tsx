@@ -93,7 +93,9 @@ export default function App() {
   return (
     <div className="panel">
       <header className="brand">
-        <div className="logo">G</div>
+        <div className="logo">
+          <img src="/icon/128.png" alt="Guidely" />
+        </div>
         <div>
           <h1>Guidely</h1>
           <p className="tagline">Click-by-click guides → PDF</p>

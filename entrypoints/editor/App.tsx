@@ -39,7 +39,9 @@ function GuideList({ onOpen }: { onOpen: (id: string) => void }) {
     <div className="container">
       <header className="topbar">
         <div className="brand-row">
-          <div className="logo">G</div>
+          <div className="logo">
+            <img src="/icon/128.png" alt="Guidely" />
+          </div>
           <div>
             <h1>Guidely</h1>
             <p className="tagline">Your guides — by Shaun Lee Wei Rong</p>

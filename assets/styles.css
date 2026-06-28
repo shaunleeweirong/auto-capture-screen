@@ -45,15 +45,15 @@ button:disabled {
 .logo {
   width: 34px;
   height: 34px;
-  border-radius: 9px;
-  background: linear-gradient(135deg, var(--accent), #7c73ff);
-  color: #fff;
-  font-weight: 800;
-  font-size: 18px;
   display: grid;
   place-items: center;
-  box-shadow: var(--shadow);
   flex: none;
+}
+
+.logo img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
 }
 
 .brand,
