@@ -82,6 +82,15 @@ try {
   await clickWait(page, '#a');
   await clickWait(page, '#b');
 
+  // --- Typed input + sensitive skip + custom dropdown (tab A, page 1) ---
+  await page.bringToFront();
+  await page.fill('#search', 'Q3 report');
+  await pause(200);
+  await page.fill('#pw', 'hunter2'); // blurs #search → flushes the "Type" step; password itself is never tracked
+  await pause(200);
+  await clickWait(page, '#b'); // a click recorded AFTER the type step (ordering check)
+  await clickWait(page, '#dd'); // custom ARIA combobox → "Open the … dropdown"
+
   // --- Same-tab navigation to page 2 (tab A) ---
   await Promise.all([page.waitForNavigation({ waitUntil: 'load' }), page.click('#go')]);
   await pause(900); // content script reloads + resumes via GUIDELY_HELLO
@@ -127,11 +136,25 @@ try {
   console.log(`\nRESULT: total=${g.steps.length} page1=${p1} page2=${p2} tabs=${distinctTabs.length}`);
 
   const fails = [];
-  if (g.steps.length < 5) fails.push(`expected >=5 steps, got ${g.steps.length}`);
+  if (g.steps.length < 7) fails.push(`expected >=7 steps, got ${g.steps.length}`);
   if (p2 < 1) fails.push('no steps captured on page 2 (same-tab navigation broken)');
   if (distinctTabs.length < 2) fails.push('steps came from only one tab — new-tab capture broken (the reported bug)');
   if (g.steps.some((s) => !s.w || !s.h)) fails.push('a step is missing screenshot dimensions');
   if (diag.errors.length) fails.push(`capture errors: ${JSON.stringify(diag.errors)}`);
+
+  // --- v0.5.0 features: typed capture, sensitive skip, custom dropdown ---
+  const texts = g.steps.map((s) => s.text);
+  const typeIdx = texts.findIndex((t) => t.startsWith('Type "Q3 report"'));
+  const ddIdx = texts.findIndex((t) => t === 'Open the "Status" dropdown');
+  console.log('\n--- v0.5.0 features ---');
+  console.log(`typed step:     ${typeIdx !== -1 ? `"${texts[typeIdx]}" @${typeIdx}` : '(missing)'}`);
+  console.log(`dropdown step:  ${ddIdx !== -1 ? `"${texts[ddIdx]}" @${ddIdx}` : '(missing)'}`);
+  console.log(`password leak:  ${texts.some((t) => t.includes('hunter2') || t.includes('"Password"'))}`);
+  if (typeIdx === -1) fails.push('typed-input step "Type \\"Q3 report\\" …" not captured');
+  if (ddIdx === -1) fails.push('custom dropdown not labeled "Open the \\"Status\\" dropdown"');
+  if (typeIdx !== -1 && ddIdx !== -1 && typeIdx >= ddIdx) fails.push('type step not ordered before the later dropdown step');
+  if (texts.some((t) => t.includes('hunter2'))) fails.push('SENSITIVE LEAK: password value appears in a step');
+  if (texts.some((t) => t.includes('"Password"'))) fails.push('SENSITIVE LEAK: a step references the password field');
 
   // --- Delete-during-recording (side-panel feature) ---
   // Delete a MIDDLE step via the same serial-queue path the panel uses, then

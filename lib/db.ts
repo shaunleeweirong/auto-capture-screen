@@ -101,7 +101,41 @@ export async function listGuideSummaries(): Promise<GuideSummary[]> {
     createdAt: g.createdAt,
     updatedAt: g.updatedAt,
     stepCount: g.steps.length,
+    tags: g.tags,
   }));
+}
+
+// Deep-copy a guide as a template: new guide id, new step ids, and a fresh copy
+// of every screenshot blob (so deleting the original can never orphan the copy).
+// Tags carry over. Runs in editor context, not on the capture queue.
+export async function duplicateGuide(id: string): Promise<string | null> {
+  const src = await getGuide(id);
+  if (!src) return null;
+  const now = Date.now();
+  const steps: Step[] = [];
+  for (const s of src.steps) {
+    const blob = await getImage(s.imageId);
+    const imageId = crypto.randomUUID();
+    if (blob) await putImage(imageId, blob);
+    steps.push({
+      ...s,
+      id: crypto.randomUUID(),
+      imageId,
+      highlight: s.highlight ? { ...s.highlight } : null,
+      blurRegions: s.blurRegions.map((r) => ({ ...r })),
+      annotations: s.annotations.map((a) => ({ ...a, rect: { ...a.rect } })),
+    });
+  }
+  const copy: Guide = {
+    id: crypto.randomUUID(),
+    title: `${src.title} (copy)`,
+    createdAt: now,
+    updatedAt: now,
+    steps,
+    ...(src.tags ? { tags: [...src.tags] } : {}),
+  };
+  await putGuide(copy);
+  return copy.id;
 }
 
 export async function deleteGuide(id: string): Promise<void> {

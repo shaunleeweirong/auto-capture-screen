@@ -8,6 +8,9 @@
       h1 { font-size: 28px; }
       button, a.btn { display: inline-block; font-size: 16px; padding: 12px 18px; margin: 8px 8px 0 0;
         border: 1px solid #6366f1; border-radius: 8px; background: #fff; color: #1e1b4b; cursor: pointer; text-decoration: none; }
+      input, .combo, select { font-size: 16px; padding: 10px 12px; margin: 8px 8px 0 0; border: 1px solid #6366f1;
+        border-radius: 8px; background: #fff; color: #1e1b4b; }
+      .combo { display: inline-block; cursor: pointer; }
     </style>
   </head>
   <body>
@@ -15,6 +18,14 @@
     <p>Single-page actions, then a navigating link.</p>
     <button id="a" aria-label="Open Settings">Open Settings</button>
     <button id="b" aria-label="Edit Profile">Edit Profile</button>
+    <div>
+      <input id="search" type="text" aria-label="Search" placeholder="Search…" />
+      <input id="pw" type="password" aria-label="Password" />
+    </div>
+    <div>
+      <div id="dd" class="combo" role="combobox" aria-haspopup="listbox" aria-expanded="false" aria-label="Status" tabindex="0">Status ▾</div>
+      <select id="country" aria-label="Country"><option value="us">USA</option><option value="ca">Canada</option></select>
+    </div>
     <p><a id="go" class="btn" href="page2.html">Continue to Page 2 (same tab)</a></p>
     <p><a id="newtab" class="btn" href="page2.html" target="_blank" rel="noopener">Open Page 2 in a new tab</a></p>
   </body>

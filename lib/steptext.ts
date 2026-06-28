@@ -6,15 +6,24 @@ export interface StepTextInput {
   type?: string;
   role?: string;
   label: string;
+  kind?: 'click' | 'type'; // 'type' → a typed-input step
+  value?: string; // the typed text (for kind === 'type')
+  dropdown?: boolean; // a custom/ARIA dropdown trigger
 }
 
-export function generateStepText({ tag, type, role, label }: StepTextInput): string {
+export function generateStepText({ tag, type, role, label, kind, value, dropdown }: StepTextInput): string {
   const name = (label || 'element').trim().replace(/\s+/g, ' ').slice(0, 80) || 'element';
   const t = tag.toLowerCase();
   const ty = (type || '').toLowerCase();
 
+  if (kind === 'type') {
+    const v = (value || '').trim().replace(/\s+/g, ' ').slice(0, 60);
+    return v ? `Type "${v}" in "${name}"` : `Fill in the "${name}" field`;
+  }
+
   if (role === 'tab') return `Open the "${name}" tab`;
   if (role === 'menuitem' || role === 'menuitemcheckbox') return `Select "${name}"`;
+  if (dropdown) return `Open the "${name}" dropdown`;
 
   if (t === 'input') {
     if (['button', 'submit', 'reset', 'image'].includes(ty)) return `Click "${name}"`;

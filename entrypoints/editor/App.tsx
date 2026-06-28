@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { Annotation, AnnotationType, FracRect, Guide, GuideSummary, Step } from '@/lib/types';
-import { deleteGuide, deleteImage, getGuide, listGuideSummaries, putGuide } from '@/lib/db';
+import { deleteGuide, deleteImage, duplicateGuide, getGuide, listGuideSummaries, putGuide } from '@/lib/db';
 import { loadImageEl } from '@/lib/images';
 import { renderStep } from '@/lib/render';
 import { exportGuideToPdf } from '@/lib/pdf';
@@ -25,6 +25,8 @@ function GuideList({ onOpen }: { onOpen: (id: string) => void }) {
   const [items, setItems] = useState<GuideSummary[] | null>(null);
   const [pendingDelete, setPendingDelete] = useState<GuideSummary | null>(null);
   const deleteTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [query, setQuery] = useState('');
+  const [activeTag, setActiveTag] = useState<string | null>(null);
 
   const refresh = useCallback(() => {
     void listGuideSummaries().then(setItems);
@@ -62,6 +64,12 @@ function GuideList({ onOpen }: { onOpen: (id: string) => void }) {
     }
   }
 
+  const allTags = items ? [...new Set(items.flatMap((g) => g.tags ?? []))].sort() : [];
+  const q = query.trim().toLowerCase();
+  const visible = (items ?? []).filter(
+    (g) => (!q || g.title.toLowerCase().includes(q)) && (!activeTag || (g.tags ?? []).includes(activeTag)),
+  );
+
   return (
     <div className="container">
       <header className="topbar">
@@ -75,6 +83,40 @@ function GuideList({ onOpen }: { onOpen: (id: string) => void }) {
           </div>
         </div>
       </header>
+
+      {items !== null && items.length > 0 && (
+        <div className="list-controls">
+          <input
+            className="search-input"
+            type="search"
+            placeholder="Search guides…"
+            aria-label="Search guides"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+          />
+          {allTags.length > 0 && (
+            <div className="filter-bar" role="group" aria-label="Filter by tag">
+              <button
+                className={`tag-chip ${activeTag === null ? 'active' : ''}`}
+                aria-pressed={activeTag === null}
+                onClick={() => setActiveTag(null)}
+              >
+                All
+              </button>
+              {allTags.map((t) => (
+                <button
+                  key={t}
+                  className={`tag-chip ${activeTag === t ? 'active' : ''}`}
+                  aria-pressed={activeTag === t}
+                  onClick={() => setActiveTag((cur) => (cur === t ? null : t))}
+                >
+                  {t}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
 
       {items === null ? (
         <div className="loading-row" role="status" aria-live="polite">
@@ -92,15 +134,29 @@ function GuideList({ onOpen }: { onOpen: (id: string) => void }) {
             Open the recorder
           </button>
         </div>
+      ) : visible.length === 0 ? (
+        <div className="empty">
+          <h2>No matching guides</h2>
+          <p>Nothing matches your search{activeTag ? ` and the “${activeTag}” tag` : ''}. Try a different term or clear the filter.</p>
+        </div>
       ) : (
         <ul className="guide-grid">
-          {items.map((g) => (
+          {visible.map((g) => (
             <li key={g.id} className="guide-card">
               <button className="guide-open" onClick={() => onOpen(g.id)} aria-label={`Open guide: ${g.title}`}>
                 <h3>{g.title}</h3>
                 <p className="meta">
                   {g.stepCount} step{g.stepCount === 1 ? '' : 's'} · {new Date(g.updatedAt).toLocaleDateString()}
                 </p>
+                {g.tags && g.tags.length > 0 && (
+                  <div className="card-tags">
+                    {g.tags.map((t) => (
+                      <span key={t} className="tag-chip sm">
+                        {t}
+                      </span>
+                    ))}
+                  </div>
+                )}
               </button>
               <button
                 className="icon-btn danger"
@@ -132,6 +188,7 @@ function GuideView({ guideId, onBack }: { guideId: string; onBack: () => void })
   const [exporting, setExporting] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [confirmingDelete, setConfirmingDelete] = useState(false);
+  const [newTag, setNewTag] = useState('');
 
   useEffect(() => {
     void getGuide(guideId).then((g) => setGuide(g ?? null));
@@ -205,6 +262,29 @@ function GuideView({ guideId, onBack }: { guideId: string; onBack: () => void })
     onBack();
   }
 
+  async function duplicate() {
+    if (!guide) return;
+    const newId = await duplicateGuide(guide.id);
+    if (newId) onBack(); // the copy lands at the top of the list
+  }
+
+  function addTag(raw: string) {
+    if (!guide) return;
+    const t = raw.trim();
+    if (!t) return;
+    const tags = guide.tags ?? [];
+    if (tags.some((x) => x.toLowerCase() === t.toLowerCase())) {
+      setNewTag('');
+      return; // case-insensitive de-dup
+    }
+    void persist({ ...guide, tags: [...tags, t] }, guide);
+    setNewTag('');
+  }
+  function removeTag(t: string) {
+    if (!guide) return;
+    void persist({ ...guide, tags: (guide.tags ?? []).filter((x) => x !== t) }, guide);
+  }
+
   if (guide === undefined) {
     return (
       <div className="container">
@@ -233,6 +313,9 @@ function GuideView({ guideId, onBack }: { guideId: string; onBack: () => void })
           ← Guides
         </button>
         <div className="spacer" />
+        <button className="btn btn-ghost" onClick={duplicate}>
+          Duplicate
+        </button>
         <button className="btn btn-ghost danger" onClick={removeGuide} onBlur={() => setConfirmingDelete(false)}>
           {confirmingDelete ? 'Confirm delete?' : 'Delete'}
         </button>
@@ -256,6 +339,31 @@ function GuideView({ guideId, onBack }: { guideId: string; onBack: () => void })
         {guide.steps.length} step{guide.steps.length === 1 ? '' : 's'} · Created{' '}
         {new Date(guide.createdAt).toLocaleString()}
       </p>
+
+      <div className="tag-editor">
+        {(guide.tags ?? []).map((t) => (
+          <span key={t} className="tag-chip">
+            {t}
+            <button className="tag-x" aria-label={`Remove tag ${t}`} onClick={() => removeTag(t)}>
+              ✕
+            </button>
+          </span>
+        ))}
+        <input
+          className="tag-input"
+          placeholder="Add tag…"
+          aria-label="Add a tag"
+          value={newTag}
+          onChange={(e) => setNewTag(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') {
+              e.preventDefault();
+              addTag(newTag);
+            }
+          }}
+          onBlur={() => newTag.trim() && addTag(newTag)}
+        />
+      </div>
 
       {saveError && (
         <p className="error" role="alert">

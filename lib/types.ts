@@ -38,6 +38,7 @@ export interface Guide {
   createdAt: number;
   updatedAt: number;
   steps: Step[];
+  tags?: string[]; // optional, additive — no DB migration needed
 }
 
 export interface GuideSummary {
@@ -46,6 +47,7 @@ export interface GuideSummary {
   createdAt: number;
   updatedAt: number;
   stepCount: number;
+  tags?: string[];
 }
 
 // Recording session state, kept in chrome.storage.session.

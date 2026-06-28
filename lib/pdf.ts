@@ -31,8 +31,9 @@ export async function exportGuideToPdf(guide: Guide, deps: PdfDeps): Promise<voi
   doc.setFontSize(10);
   doc.setTextColor(120, 120, 130);
   const created = new Date(guide.createdAt).toLocaleDateString();
+  const tagsPart = guide.tags && guide.tags.length ? `  ·  ${guide.tags.join(', ')}` : '';
   doc.text(
-    `${guide.steps.length} step${guide.steps.length === 1 ? '' : 's'}  ·  ${created}  ·  Built with Guidely by Shaun Lee Wei Rong`,
+    `${guide.steps.length} step${guide.steps.length === 1 ? '' : 's'}  ·  ${created}${tagsPart}  ·  Built with Guidely by Shaun Lee Wei Rong`,
     margin,
     y,
   );

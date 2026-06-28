@@ -2,7 +2,10 @@
 
 import type { FracRect } from './types';
 
+export type StepKind = 'click' | 'type';
+
 export interface StepPayload {
+  kind?: StepKind; // optional → defaults to a click; preserves back-compat
   stepText: string;
   label: string;
   url: string;
