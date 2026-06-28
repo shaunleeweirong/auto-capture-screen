@@ -41,22 +41,36 @@ export async function exportGuideToPdf(guide: Guide, deps: PdfDeps): Promise<voi
   // ---- Steps ----
   for (let i = 0; i < guide.steps.length; i++) {
     const step = guide.steps[i];
-    const img = await deps.loadImage(step.imageId);
-    const canvas = renderStep(img, step, { stepNumber: i + 1 });
-    const dataUrl = canvas.toDataURL('image/jpeg', 0.85);
+
+    // Load + composite the screenshot. If one image is missing or corrupt, keep
+    // the step caption (noting the screenshot is gone) instead of failing the
+    // entire export — one bad blob shouldn't make the whole guide un-exportable.
+    let dataUrl: string | null = null;
+    let aspect = 0; // height / width
+    try {
+      const img = await deps.loadImage(step.imageId);
+      const canvas = renderStep(img, step, { stepNumber: i + 1 });
+      dataUrl = canvas.toDataURL('image/jpeg', 0.85);
+      aspect = canvas.height / canvas.width;
+    } catch (e) {
+      console.error('[guidely] step image unavailable, exporting caption only', e);
+    }
 
     doc.setFont('helvetica', 'bold');
     doc.setFontSize(12);
     doc.setTextColor(17, 24, 39);
-    const lines = doc.splitTextToSize(`${i + 1}.  ${step.text}`, contentW);
+    const caption = dataUrl ? `${i + 1}.  ${step.text}` : `${i + 1}.  ${step.text}  (screenshot unavailable)`;
+    const lines = doc.splitTextToSize(caption, contentW);
     const textH = lines.length * 15 + 6;
 
+    // Height left for the image after the caption — never negative, so a long
+    // caption can't drive doc.addImage into negative dimensions.
+    const maxImgH = Math.max(0, pageH - margin * 2 - textH);
     let imgW = contentW;
-    let imgH = (canvas.height / canvas.width) * imgW;
-    const maxImgH = pageH - margin * 2 - textH;
+    let imgH = dataUrl ? aspect * imgW : 0;
     if (imgH > maxImgH) {
       imgH = maxImgH;
-      imgW = (canvas.width / canvas.height) * imgH;
+      imgW = imgH / aspect; // aspect > 0 whenever imgH > 0
     }
 
     const blockH = textH + imgH + 18;
@@ -67,10 +81,14 @@ export async function exportGuideToPdf(guide: Guide, deps: PdfDeps): Promise<voi
 
     doc.text(lines, margin, y + 11);
     y += textH;
-    doc.addImage(dataUrl, 'JPEG', margin, y, imgW, imgH);
-    doc.setDrawColor(226, 232, 240);
-    doc.rect(margin, y, imgW, imgH);
-    y += imgH + 18;
+    if (dataUrl && imgH > 0) {
+      doc.addImage(dataUrl, 'JPEG', margin, y, imgW, imgH);
+      doc.setDrawColor(226, 232, 240);
+      doc.rect(margin, y, imgW, imgH);
+      y += imgH + 18;
+    } else {
+      y += 18;
+    }
   }
 
   const safe = (guide.title || 'guidely-guide').replace(/[^\w\- ]+/g, '').trim() || 'guidely-guide';

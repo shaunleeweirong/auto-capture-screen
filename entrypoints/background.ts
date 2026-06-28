@@ -14,6 +14,7 @@ import { getState, patchState, setState } from '@/lib/state';
 const RECORDER_SCRIPT = 'content-scripts/recorder.js';
 const MIN_CAPTURE_INTERVAL = 520; // Chrome throttles captureVisibleTab to 2/sec
 const MAX_IMAGE_WIDTH = 1600; // downscale cap to keep storage + PDF sizes sane
+const MAX_CAPTURE_ATTEMPTS = 3; // retry slow-nav / quota rejections before giving up
 
 // Test-only instrumentation for the e2e test, gated on the build mode so it is
 // dead-code-eliminated from the production build (npm run build => MODE=production).
@@ -138,6 +139,12 @@ async function stopRecording(): Promise<StartStopResponse> {
   if (st.windowId != null) {
     await broadcastRecording(st.windowId, false);
   }
+  // Drop captures still queued from clicks just before Stop so they can't
+  // append steps after the user stopped (which would also desync the count the
+  // editor opens with). Queued mutations (delete/rename) are left intact.
+  for (let i = queue.length - 1; i >= 0; i--) {
+    if (queue[i].kind === 'capture') queue.splice(i, 1);
+  }
   await patchState({ recording: false });
   return { ok: true, guideId: st.guideId, count: st.count };
 }
@@ -248,17 +255,43 @@ async function handleUpdateStep(stepId: string, text: string): Promise<StepMutat
 async function captureAndStore(payload: StepPayload, st: RecState) {
   if (!st.guideId || st.windowId == null) return;
 
+  // Captures queued just before Stop must not append steps afterwards. Tasks run
+  // ~520ms apart, so the live state can differ from the enqueue-time snapshot —
+  // re-read it and bail if we're no longer recording this guide.
+  const before = await getState();
+  if (!before.recording || before.guideId !== st.guideId) return;
+
   // A click that opens a new tab (or navigates) can momentarily leave the
   // window on a not-yet-committed page, where captureVisibleTab throws a
-  // host-access error. Retry once after a short delay so the new page commits.
-  let dataUrl: string;
-  try {
-    dataUrl = await chrome.tabs.captureVisibleTab(st.windowId, { format: 'png' });
-  } catch {
-    await sleep(400);
-    dataUrl = await chrome.tabs.captureVisibleTab(st.windowId, { format: 'png' });
+  // host-access error; the 2/sec quota can also reject. Retry with backoff so a
+  // slow navigation or a momentary quota hit doesn't silently drop the step.
+  let dataUrl: string | undefined;
+  for (let attempt = 1; attempt <= MAX_CAPTURE_ATTEMPTS; attempt++) {
+    try {
+      dataUrl = await chrome.tabs.captureVisibleTab(st.windowId, { format: 'png' });
+      break;
+    } catch (e) {
+      if (attempt === MAX_CAPTURE_ATTEMPTS) {
+        // Don't rethrow (drain only logs): surface it so the user can re-click
+        // instead of being left with a silent gap in the guide.
+        console.error('[guidely] capture failed after retries', e);
+        if (TESTING) diag.errors.push(errMsg(e));
+        await patchState({ error: "A step couldn't be captured — click it again." });
+        return;
+      }
+      await sleep(attempt * 400); // back off; also lets the new page commit
+    }
   }
+  if (!dataUrl) return;
+
   const { blob, width, height } = await processScreenshot(dataUrl);
+
+  // Re-check after the (possibly slow) capture: recording may have stopped or
+  // switched guides while awaiting. Bail before persisting so nothing lands
+  // post-Stop. (A discarded image blob here is a harmless orphan.)
+  const live = await getState();
+  if (!live.recording || live.guideId !== st.guideId) return;
+
   const imageId = crypto.randomUUID();
   await putImage(imageId, blob);
 
@@ -275,7 +308,7 @@ async function captureAndStore(payload: StepPayload, st: RecState) {
     imageH: height,
   };
   const count = await appendStep(st.guideId, step);
-  await patchState({ count });
+  await patchState({ count, error: undefined }); // clear any prior capture error
   if (TESTING) diag.captures.push(payload.url);
 }
 

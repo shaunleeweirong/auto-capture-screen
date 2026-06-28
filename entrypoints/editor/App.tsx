@@ -23,16 +23,43 @@ export default function App() {
 
 function GuideList({ onOpen }: { onOpen: (id: string) => void }) {
   const [items, setItems] = useState<GuideSummary[] | null>(null);
+  const [pendingDelete, setPendingDelete] = useState<GuideSummary | null>(null);
+  const deleteTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const refresh = useCallback(() => {
     void listGuideSummaries().then(setItems);
   }, []);
   useEffect(refresh, [refresh]);
 
-  async function remove(id: string) {
-    if (!confirm('Delete this guide? This cannot be undone.')) return;
-    await deleteGuide(id);
+  // Soft delete with a 5s undo window: drop it from the list immediately but
+  // defer the (irreversible) DB delete so the user can take it back.
+  function requestRemove(g: GuideSummary) {
+    if (deleteTimer.current) {
+      clearTimeout(deleteTimer.current); // commit any already-pending delete first
+      if (pendingDelete) void deleteGuide(pendingDelete.id);
+    }
+    setItems((prev) => prev?.filter((x) => x.id !== g.id) ?? prev);
+    setPendingDelete(g);
+    deleteTimer.current = setTimeout(() => {
+      void deleteGuide(g.id);
+      deleteTimer.current = null;
+      setPendingDelete(null);
+    }, 5000);
+  }
+  function undoRemove() {
+    if (deleteTimer.current) clearTimeout(deleteTimer.current);
+    deleteTimer.current = null;
+    setPendingDelete(null);
     refresh();
+  }
+
+  async function openRecorder() {
+    try {
+      const win = await chrome.windows.getCurrent();
+      if (win.id != null) await chrome.sidePanel.open({ windowId: win.id });
+    } catch (e) {
+      console.error('[guidely] could not open the side panel', e);
+    }
   }
 
   return (
@@ -50,7 +77,10 @@ function GuideList({ onOpen }: { onOpen: (id: string) => void }) {
       </header>
 
       {items === null ? (
-        <p className="muted">Loading…</p>
+        <div className="loading-row" role="status" aria-live="polite">
+          <span className="spinner" aria-hidden="true" />
+          <span>Loading your guides…</span>
+        </div>
       ) : items.length === 0 ? (
         <div className="empty">
           <h2>No guides yet</h2>
@@ -58,23 +88,38 @@ function GuideList({ onOpen }: { onOpen: (id: string) => void }) {
             Open the Guidely side panel on any website, press <strong>Start recording</strong>, and click through a
             workflow. Your guide will appear here.
           </p>
+          <button className="btn btn-primary" onClick={openRecorder}>
+            Open the recorder
+          </button>
         </div>
       ) : (
         <ul className="guide-grid">
           {items.map((g) => (
             <li key={g.id} className="guide-card">
-              <button className="guide-open" onClick={() => onOpen(g.id)}>
+              <button className="guide-open" onClick={() => onOpen(g.id)} aria-label={`Open guide: ${g.title}`}>
                 <h3>{g.title}</h3>
                 <p className="meta">
                   {g.stepCount} step{g.stepCount === 1 ? '' : 's'} · {new Date(g.updatedAt).toLocaleDateString()}
                 </p>
               </button>
-              <button className="icon-btn danger" title="Delete guide" onClick={() => remove(g.id)}>
+              <button
+                className="icon-btn danger"
+                title="Delete guide"
+                aria-label={`Delete guide: ${g.title}`}
+                onClick={() => requestRemove(g)}
+              >
                 ✕
               </button>
             </li>
           ))}
         </ul>
+      )}
+
+      {pendingDelete && (
+        <div className="toast" role="status" aria-live="polite">
+          <span>Deleted “{pendingDelete.title}”</span>
+          <button onClick={undoRemove}>Undo</button>
+        </div>
       )}
     </div>
   );
@@ -85,25 +130,38 @@ function GuideList({ onOpen }: { onOpen: (id: string) => void }) {
 function GuideView({ guideId, onBack }: { guideId: string; onBack: () => void }) {
   const [guide, setGuide] = useState<Guide | null | undefined>(undefined);
   const [exporting, setExporting] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
 
   useEffect(() => {
     void getGuide(guideId).then((g) => setGuide(g ?? null));
   }, [guideId]);
 
-  const persist = useCallback((next: Guide) => {
+  // Optimistically apply the edit, then await the write. If the write fails we
+  // revert to `prev` and surface it — edits (including privacy blur regions)
+  // must never silently disappear on the next reload. Returns whether it saved.
+  const persist = useCallback(async (next: Guide, prev: Guide): Promise<boolean> => {
     next.updatedAt = Date.now();
     setGuide(next);
-    void putGuide(next);
+    try {
+      await putGuide(next);
+      setSaveError(null);
+      return true;
+    } catch {
+      setGuide(prev);
+      setSaveError("Couldn't save your change — it was undone. Check available storage and try again.");
+      return false;
+    }
   }, []);
 
   function setTitle(title: string) {
     if (!guide) return;
-    persist({ ...guide, title });
+    void persist({ ...guide, title }, guide);
   }
 
   function updateStep(stepId: string, patch: Partial<Step>) {
     if (!guide) return;
-    persist({ ...guide, steps: guide.steps.map((s) => (s.id === stepId ? { ...s, ...patch } : s)) });
+    void persist({ ...guide, steps: guide.steps.map((s) => (s.id === stepId ? { ...s, ...patch } : s)) }, guide);
   }
 
   function moveStep(index: number, dir: -1 | 1) {
@@ -112,13 +170,15 @@ function GuideView({ guideId, onBack }: { guideId: string; onBack: () => void })
     if (target < 0 || target >= guide.steps.length) return;
     const steps = guide.steps.slice();
     [steps[index], steps[target]] = [steps[target], steps[index]];
-    persist({ ...guide, steps });
+    void persist({ ...guide, steps }, guide);
   }
 
   async function removeStep(step: Step) {
     if (!guide) return;
-    persist({ ...guide, steps: guide.steps.filter((s) => s.id !== step.id) });
-    await deleteImage(step.imageId).catch(() => {});
+    // Only drop the image blob once the guide write that removed the step has
+    // actually committed, so a failed save can't orphan a still-referenced image.
+    const ok = await persist({ ...guide, steps: guide.steps.filter((s) => s.id !== step.id) }, guide);
+    if (ok) await deleteImage(step.imageId).catch(() => {});
   }
 
   async function exportPdf() {
@@ -135,7 +195,12 @@ function GuideView({ guideId, onBack }: { guideId: string; onBack: () => void })
 
   async function removeGuide() {
     if (!guide) return;
-    if (!confirm('Delete this entire guide? This cannot be undone.')) return;
+    // Two-step inline confirm instead of a jarring native dialog: first click
+    // arms it, second click deletes. Blur (below) disarms it.
+    if (!confirmingDelete) {
+      setConfirmingDelete(true);
+      return;
+    }
     await deleteGuide(guide.id);
     onBack();
   }
@@ -143,7 +208,10 @@ function GuideView({ guideId, onBack }: { guideId: string; onBack: () => void })
   if (guide === undefined) {
     return (
       <div className="container">
-        <p className="muted">Loading…</p>
+        <div className="loading-row" role="status" aria-live="polite">
+          <span className="spinner" aria-hidden="true" />
+          <span>Loading…</span>
+        </div>
       </div>
     );
   }
@@ -165,11 +233,16 @@ function GuideView({ guideId, onBack }: { guideId: string; onBack: () => void })
           ← Guides
         </button>
         <div className="spacer" />
-        <button className="btn btn-ghost danger" onClick={removeGuide}>
-          Delete
+        <button className="btn btn-ghost danger" onClick={removeGuide} onBlur={() => setConfirmingDelete(false)}>
+          {confirmingDelete ? 'Confirm delete?' : 'Delete'}
         </button>
-        <button className="btn btn-primary" onClick={exportPdf} disabled={exporting || guide.steps.length === 0}>
-          {exporting ? 'Exporting…' : '⬇ Export PDF'}
+        <button
+          className="btn btn-primary"
+          onClick={exportPdf}
+          disabled={exporting || guide.steps.length === 0}
+          aria-busy={exporting}
+        >
+          {exporting ? 'Creating PDF…' : 'Download PDF'}
         </button>
       </header>
 
@@ -183,6 +256,12 @@ function GuideView({ guideId, onBack }: { guideId: string; onBack: () => void })
         {guide.steps.length} step{guide.steps.length === 1 ? '' : 's'} · Created{' '}
         {new Date(guide.createdAt).toLocaleString()}
       </p>
+
+      {saveError && (
+        <p className="error" role="alert">
+          {saveError}
+        </p>
+      )}
 
       {guide.steps.length === 0 ? (
         <div className="empty">
@@ -250,18 +329,36 @@ function StepRow({
     <li className="step-row">
       <div className="step-head">
         <span className="step-num">{index + 1}</span>
-        <input className="step-text" defaultValue={step.text} key={step.text} onBlur={(e) => onPatch({ text: e.target.value })} />
+        <input
+          className="step-text"
+          aria-label={`Step ${index + 1} description`}
+          defaultValue={step.text}
+          key={step.text}
+          onBlur={(e) => onPatch({ text: e.target.value })}
+        />
         <div className="step-actions">
-          <button className={`icon-btn ${editing ? 'active' : ''}`} title="Blur & annotate" onClick={() => setEditing((v) => !v)}>
+          <button
+            className={`icon-btn ${editing ? 'active' : ''}`}
+            title="Edit screenshot — blur & annotate"
+            aria-label={`Edit screenshot for step ${index + 1}: blur and annotate`}
+            aria-pressed={editing}
+            onClick={() => setEditing((v) => !v)}
+          >
             ✎
           </button>
-          <button className="icon-btn" title="Move up" disabled={index === 0} onClick={() => onMove(-1)}>
+          <button className="icon-btn" title="Move up" aria-label={`Move step ${index + 1} up`} disabled={index === 0} onClick={() => onMove(-1)}>
             ↑
           </button>
-          <button className="icon-btn" title="Move down" disabled={index === total - 1} onClick={() => onMove(1)}>
+          <button
+            className="icon-btn"
+            title="Move down"
+            aria-label={`Move step ${index + 1} down`}
+            disabled={index === total - 1}
+            onClick={() => onMove(1)}
+          >
             ↓
           </button>
-          <button className="icon-btn danger" title="Delete step" onClick={onDelete}>
+          <button className="icon-btn danger" title="Delete step" aria-label={`Delete step ${index + 1}`} onClick={onDelete}>
             ✕
           </button>
         </div>
@@ -270,7 +367,7 @@ function StepRow({
       {editing ? (
         <StepAnnotator step={step} onPatch={onPatch} onDone={() => setEditing(false)} />
       ) : (
-        <div className="step-shot">{src ? <img src={src} alt={`Step ${index + 1}`} /> : <div className="shot-skeleton" />}</div>
+        <div className="step-shot">{src ? <img src={src} alt={`Step ${index + 1}: ${step.text}`} /> : <div className="shot-skeleton" />}</div>
       )}
     </li>
   );
@@ -365,7 +462,12 @@ function StepAnnotator({ step, onPatch, onDone }: { step: Step; onPatch: (patch:
     <div className="annotator">
       <div className="anno-toolbar">
         {(['box', 'ellipse', 'arrow', 'text', 'blur'] as Tool[]).map((t) => (
-          <button key={t} className={`tool-btn ${tool === t ? 'active' : ''}`} onClick={() => setTool(t)}>
+          <button
+            key={t}
+            className={`tool-btn ${tool === t ? 'active' : ''}`}
+            aria-pressed={tool === t}
+            onClick={() => setTool(t)}
+          >
             {toolLabel(t)}
           </button>
         ))}
@@ -377,6 +479,8 @@ function StepAnnotator({ step, onPatch, onDone }: { step: Step; onPatch: (patch:
             style={{ background: c }}
             onClick={() => setColor(c)}
             title={c}
+            aria-label={`Annotation color ${c}`}
+            aria-pressed={color === c}
           />
         ))}
         <span className="spacer" />
@@ -399,7 +503,12 @@ function StepAnnotator({ step, onPatch, onDone }: { step: Step; onPatch: (patch:
         {step.blurRegions.map((r, i) => (
           <div key={`b${i}`} className="ov ov-blur" style={boxStyle(r)}>
             <span className="ov-tag">blur</span>
-            <button className="ov-del" onPointerDown={(e) => e.stopPropagation()} onClick={() => removeBlur(i)}>
+            <button
+              className="ov-del"
+              aria-label="Remove blur region"
+              onPointerDown={(e) => e.stopPropagation()}
+              onClick={() => removeBlur(i)}
+            >
               ✕
             </button>
           </div>
@@ -437,6 +546,7 @@ function AnnotationOverlay({ a, onDelete }: { a: Annotation; onDelete: () => voi
         </svg>
         <button
           className="ov-del floating"
+          aria-label="Remove annotation"
           style={{ left: `${(a.rect.x + a.rect.w) * 100}%`, top: `${(a.rect.y + a.rect.h) * 100}%` }}
           onPointerDown={(e) => e.stopPropagation()}
           onClick={onDelete}
@@ -450,7 +560,7 @@ function AnnotationOverlay({ a, onDelete }: { a: Annotation; onDelete: () => voi
     return (
       <div className="ov ov-text" style={{ left: `${a.rect.x * 100}%`, top: `${a.rect.y * 100}%`, color: a.color }}>
         {a.text}
-        <button className="ov-del" onPointerDown={(e) => e.stopPropagation()} onClick={onDelete}>
+        <button className="ov-del" aria-label="Remove annotation" onPointerDown={(e) => e.stopPropagation()} onClick={onDelete}>
           ✕
         </button>
       </div>

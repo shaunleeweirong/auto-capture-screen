@@ -56,16 +56,28 @@ export default function App() {
   async function start() {
     setBusy(true);
     setError(null);
-    const res = (await chrome.runtime.sendMessage({ type: 'START_RECORDING' } satisfies PanelMsg)) as StartStopResponse;
-    setBusy(false);
-    if (!res?.ok) setError(res?.error ?? 'Could not start recording.');
+    // try/finally so a rejected message (service worker mid-restart / closed
+    // port) can never leave the button stuck disabled.
+    try {
+      const res = (await chrome.runtime.sendMessage({ type: 'START_RECORDING' } satisfies PanelMsg)) as StartStopResponse;
+      if (!res?.ok) setError(res?.error ?? "Couldn't start recording. Open a normal website tab and try again.");
+    } catch {
+      setError("Couldn't reach Guidely. Reopen this panel and try again.");
+    } finally {
+      setBusy(false);
+    }
   }
 
   async function stop() {
     setBusy(true);
-    const res = (await chrome.runtime.sendMessage({ type: 'STOP_RECORDING' } satisfies PanelMsg)) as StartStopResponse;
-    setBusy(false);
-    if (res?.ok && res.guideId && (res.count ?? 0) > 0) openEditor(res.guideId);
+    try {
+      const res = (await chrome.runtime.sendMessage({ type: 'STOP_RECORDING' } satisfies PanelMsg)) as StartStopResponse;
+      if (res?.ok && res.guideId && (res.count ?? 0) > 0) openEditor(res.guideId);
+    } catch {
+      setError("Couldn't stop cleanly. Reopen this panel and try again.");
+    } finally {
+      setBusy(false);
+    }
   }
 
   async function handleDelete(stepId: string) {
@@ -106,12 +118,20 @@ export default function App() {
         <>
           <section className="card recording">
             <div className="rec-dot" />
-            <div className="rec-count">{count}</div>
-            <div className="rec-label">step{count === 1 ? '' : 's'} captured</div>
+            <div role="status" aria-live="polite">
+              <div className="rec-count">{count}</div>
+              <div className="rec-label">step{count === 1 ? '' : 's'} captured</div>
+            </div>
             <button className="btn btn-stop" onClick={stop} disabled={busy}>
               Stop &amp; review
             </button>
           </section>
+
+          {state.error && (
+            <p className="error" role="alert">
+              {state.error}
+            </p>
+          )}
 
           {steps.length === 0 ? (
             <p className="hint">Click through your workflow — each click becomes a step.</p>
@@ -138,7 +158,8 @@ export default function App() {
             Record a workflow into a step-by-step guide, then export it as a PDF — all on your device, nothing uploaded.
           </p>
           <button className="btn btn-primary" onClick={start} disabled={busy}>
-            ● Start recording
+            <span className="rec-bullet" aria-hidden="true" />
+            {busy ? 'Starting…' : 'Start recording'}
           </button>
           {state.error && !error && <p className="error">{state.error}</p>}
         </section>

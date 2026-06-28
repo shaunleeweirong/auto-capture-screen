@@ -48,6 +48,7 @@ export default function RecStepCard({
             typing, and only this input ever changes the text. */}
         <input
           className="step-text"
+          aria-label={`Step ${index + 1} description`}
           defaultValue={step.text}
           onBlur={(e) => {
             const text = e.target.value;
@@ -55,13 +56,19 @@ export default function RecStepCard({
           }}
         />
         <div className="step-actions">
-          <button className="icon-btn danger" title="Delete step" onClick={onDelete} disabled={deleting}>
+          <button
+            className="icon-btn danger"
+            title="Delete step"
+            aria-label={`Delete step ${index + 1}`}
+            onClick={onDelete}
+            disabled={deleting}
+          >
             ✕
           </button>
         </div>
       </div>
       <div className="step-shot">
-        {src ? <img src={src} alt={`Step ${index + 1}`} /> : <div className="shot-skeleton" />}
+        {src ? <img src={src} alt={`Step ${index + 1}: ${step.text}`} /> : <div className="shot-skeleton" />}
       </div>
     </li>
   );

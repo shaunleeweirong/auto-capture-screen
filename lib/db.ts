@@ -24,8 +24,27 @@ function openDb(): Promise<IDBDatabase> {
         db.createObjectStore(STORE_IMAGES);
       }
     };
-    req.onsuccess = () => resolve(req.result);
+    req.onsuccess = () => {
+      const db = req.result;
+      // If the connection later closes or another tab triggers a version
+      // change, drop the cache so the next call reopens instead of reusing a
+      // dead handle.
+      db.onclose = () => {
+        if (dbPromise) dbPromise = null;
+      };
+      db.onversionchange = () => {
+        db.close();
+        dbPromise = null;
+      };
+      resolve(db);
+    };
     req.onerror = () => reject(req.error);
+  });
+  // Never cache a rejected open: a single transient failure must not brick all
+  // storage for the lifetime of the page/service worker. Clearing the cache
+  // lets the next call retry from scratch.
+  dbPromise.catch(() => {
+    dbPromise = null;
   });
   return dbPromise;
 }
